@@ -10,9 +10,11 @@ is a backport of `asyncio` that works on Python 2.6+.
 """
 from __future__ import absolute_import
 
+import logging
 import os
 import sys
 from collections import deque
+import threading
 
 try:
     # For python 3.4+, use the standard library module
@@ -23,13 +25,38 @@ except (ImportError, SyntaxError):
 
 from .base import BaseEventLoop
 
+logger = logging.getLogger(__name__)
+debug, info, warn = (logger.debug, logger.info, logger.warning,)
 
 loop_cls = asyncio.SelectorEventLoop
 if os.name == 'nt':
     # On windows use ProactorEventLoop which support pipes and is backed by the
     # more powerful IOCP facility
+    # NOTE: we override in the stdio case, because it doesn't work.
     loop_cls = asyncio.ProactorEventLoop
 
+    import msvcrt
+    from ctypes import windll, byref, wintypes, GetLastError, WinError, POINTER
+    from ctypes.wintypes import HANDLE, DWORD, BOOL
+
+    LPDWORD = POINTER(DWORD)
+
+    PIPE_NOWAIT = wintypes.DWORD(0x00000001)
+
+    ERROR_NO_DATA = 232
+
+    def pipe_no_wait(pipefd):
+        SetNamedPipeHandleState = windll.kernel32.SetNamedPipeHandleState
+        SetNamedPipeHandleState.argtypes = [HANDLE, LPDWORD, LPDWORD, LPDWORD]
+        SetNamedPipeHandleState.restype = BOOL
+
+        h = msvcrt.get_osfhandle(pipefd)
+
+        res = windll.kernel32.SetNamedPipeHandleState(h, byref(PIPE_NOWAIT), None, None)
+        if res == 0:
+            print(WinError())
+            return False
+        return True
 
 class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
                        asyncio.SubprocessProtocol):
@@ -76,6 +103,8 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
         self._queued_data = deque()
         self._fact = lambda: self
         self._raw_transport = None
+        self._raw_stdout = False
+        self._active = False
 
     def _connect_tcp(self, address, port):
         coroutine = self._loop.create_connection(self._fact, address, port)
@@ -88,11 +117,43 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
             coroutine = self._loop.create_unix_connection(self._fact, path)
         self._loop.run_until_complete(coroutine)
 
+    def _stdin_reader(self):
+        debug("started reader thread")
+        while True: #self._active
+            data = self._stdin.read(1)
+            debug("reader thread read %d", len(data))
+            self._loop.call_soon_threadsafe(self.data_received, data)
+
     def _connect_stdio(self):
-        coroutine = self._loop.connect_read_pipe(self._fact, sys.stdin)
-        self._loop.run_until_complete(coroutine)
-        coroutine = self._loop.connect_write_pipe(self._fact, sys.stdout)
-        self._loop.run_until_complete(coroutine)
+        try:
+            coroutine = self._loop.connect_read_pipe(self._fact, sys.stdin)
+            self._loop.run_until_complete(coroutine)
+            debug("native stdin connection successful")
+        except OSError:
+            debug("native stdin connection failed, using reader thread")
+            if os.name == "nt":
+                pass
+                #pipe_no_wait(sys.stdin.fileno())
+            else:
+                import fcntl
+                #orig_fl = fcntl.fcntl(sys.stdin.fileno(), fcntl.F_GETFL)
+                #fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETFL, orig_fl | os.O_NONBLOCK)
+            #coro = self._loop.run_in_executor(None, self._stdin_reader)
+            #self._loop.create_task(coro)
+            self._stdin = sys.stdin.buffer
+            self._active = True
+            threading.Thread(target=self._stdin_reader).start()
+
+
+        try:
+            coroutine = self._loop.connect_write_pipe(self._fact, sys.stdout)
+            self._loop.run_until_complete(coroutine)
+            debug("native stdout connection successful")
+        except OSError:
+            debug("native stdout connection failed, using reader thread")
+
+            self._stdout = sys.stdout.buffer
+            self._raw_stdout = True
 
     def _connect_child(self, argv):
         self._child_watcher = asyncio.get_child_watcher()
@@ -104,7 +165,12 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
         pass
 
     def _send(self, data):
-        self._transport.write(data)
+        debug("sent %s %s", repr(data), str(self._raw_stdout))
+        if self._raw_stdout:
+            self._stdout.write(data)
+            self._stdout.flush()
+        else:
+            self._transport.write(data)
 
     def _run(self):
         while self._queued_data:
@@ -117,6 +183,8 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
     def _close(self):
         if self._raw_transport is not None:
             self._raw_transport.close()
+        # FIXME: this is racy and stuff
+        self._active = False
         self._loop.close()
 
     def _threadsafe_call(self, fn):
