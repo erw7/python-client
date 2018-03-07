@@ -8,7 +8,7 @@ import os
 from ...compat import IS_PYTHON3
 
 # on python3 we only support asyncio, as we expose it to plugins
-if IS_PYTHON3 and os.name != 'nt':
+if IS_PYTHON3:
     from .asyncio import AsyncioEventLoop
     EventLoop = AsyncioEventLoop
 else:

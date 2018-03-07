@@ -30,6 +30,59 @@ if os.name == 'nt':
     # more powerful IOCP facility
     loop_cls = asyncio.ProactorEventLoop
 
+    import msvcrt
+    from ctypes import windll, byref, wintypes, WinError, POINTER
+    from ctypes.wintypes import HANDLE, LPHANDLE, DWORD, BOOL
+
+    LPDWORD = POINTER(DWORD)
+
+    DUPLICATE_SAME_ACCESS = wintypes.DWORD(0x00000002)
+    INVALID_HANDLE_VALUE = HANDLE(-1).value
+    PIPE_READMODE_BYTE = wintypes.DWORD(0x00000000)
+    PIPE_WAIT = wintypes.DWORD(0x00000000)
+
+    def dup_file(file):
+        DuplicateHandle = windll.kernel32.DuplicateHandle
+        DuplicateHandle.argtypes = [HANDLE,
+                                    HANDLE,
+                                    HANDLE,
+                                    LPHANDLE,
+                                    DWORD,
+                                    BOOL,
+                                    DWORD]
+        DuplicateHandle.restype = BOOL
+
+        SetNamedPipeHandleState = windll.kernel32.SetNamedPipeHandleState
+        SetNamedPipeHandleState.argtypes = [HANDLE, LPDWORD, LPDWORD, LPDWORD]
+        SetNamedPipeHandleState.restype = BOOL
+
+        hsource = msvcrt.get_osfhandle(file.fileno())
+        htarget = HANDLE()
+
+        res = windll.kernel32.DuplicateHandle(INVALID_HANDLE_VALUE,
+                                              hsource,
+                                              INVALID_HANDLE_VALUE,
+                                              byref(htarget),
+                                              0,
+                                              BOOL(False),
+                                              DUPLICATE_SAME_ACCESS)
+        if res == 0:
+            print(WinError())
+            return None
+
+        mode = DWORD(0x00000000)
+        res = windll.kernel32.SetNamedPipeHandleState(htarget,
+                                                      byref(mode),
+                                                      None,
+                                                      None)
+        if res == 0:
+            print(WinError())
+            return None
+
+        fd = msvcrt.open_osfhandle(htarget.value, 0)
+        f = os.fdopen(fd)
+        return f
+
 
 class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
                        asyncio.SubprocessProtocol):
@@ -89,9 +142,17 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
         self._loop.run_until_complete(coroutine)
 
     def _connect_stdio(self):
-        coroutine = self._loop.connect_read_pipe(self._fact, sys.stdin)
+        if os.name == 'nt':
+            coroutine = self._loop.connect_read_pipe(self._fact,
+                                                     dup_file(sys.stdin))
+        else:
+            coroutine = self._loop.connect_read_pipe(self._fact, sys.stdin)
         self._loop.run_until_complete(coroutine)
-        coroutine = self._loop.connect_write_pipe(self._fact, sys.stdout)
+        if os.name == 'nt':
+            coroutine = self._loop.connect_write_pipe(self._fact,
+                                                      dup_file(sys.stdout))
+        else:
+            coroutine = self._loop.connect_write_pipe(self._fact, sys.stdout)
         self._loop.run_until_complete(coroutine)
 
     def _connect_child(self, argv):
