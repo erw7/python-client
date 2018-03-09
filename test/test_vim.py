@@ -1,13 +1,18 @@
 # -*- coding: utf-8 -*-
-import os, tempfile
+import os
+import tempfile
 from nose.tools import with_setup, eq_ as eq, ok_ as ok
 from test_common import vim, cleanup
+from time import sleep
+
+UNLINK_RETRY = 5
+
 
 def source(code):
     fd, fname = tempfile.mkstemp()
-    with os.fdopen(fd,'w') as f:
+    with os.fdopen(fd, 'w') as f:
         f.write(code)
-    vim.command('source '+fname)
+    vim.command('source ' + fname)
     os.unlink(fname)
 
 
@@ -22,8 +27,12 @@ def test_command():
     vim.command('w')
     ok(os.path.isfile(fname))
     with open(fname) as f:
-      eq(f.read(), 'testing\npython\napi\n')
-    os.unlink(fname)
+        eq(f.read(), 'testing\npython\napi\n')
+    for retry_count in range(1, UNLINK_RETRY):
+        try:
+            os.unlink(fname)
+        except OSError:
+            sleep(1)
 
 
 @with_setup
@@ -36,6 +45,7 @@ def test_eval():
     vim.command('let g:v1 = "a"')
     vim.command('let g:v2 = [1, 2, {"v3": 3}]')
     eq(vim.eval('g:'), {'v1': 'a', 'v2': [1, 2, {'v3': 3}]})
+
 
 @with_setup(setup=cleanup)
 def test_call():
@@ -60,6 +70,7 @@ def test_strwidth():
     # 6 + (neovim)
     # 19 * 2 (each japanese character occupies two cells)
     eq(vim.strwidth('neovimのデザインかなりまともなのになってる。'), 44)
+
 
 @with_setup(setup=cleanup)
 def test_chdir():
