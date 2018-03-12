@@ -12,7 +12,11 @@ from __future__ import absolute_import
 
 import os
 import sys
+import logging
 from collections import deque
+
+logger = logging.getLogger(__name__)
+debug, info, warn = (logger.debug, logger.info, logger.warning)
 
 try:
     # For python 3.4+, use the standard library module
@@ -41,7 +45,14 @@ if os.name == 'nt':
     PIPE_READMODE_BYTE = wintypes.DWORD(0x00000000)
     PIPE_WAIT = wintypes.DWORD(0x00000000)
 
-    def dup_file(file):
+    import functools
+    def _file_handle(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            return msvcrt.get_osfhandle(func())
+        return wrapper
+
+    def dup_file(file, fmode='rb'):
         DuplicateHandle = windll.kernel32.DuplicateHandle
         DuplicateHandle.argtypes = [HANDLE,
                                     HANDLE,
@@ -80,7 +91,8 @@ if os.name == 'nt':
             return None
 
         fd = msvcrt.open_osfhandle(htarget.value, 0)
-        f = os.fdopen(fd)
+        f = os.fdopen(fd, mode=fmode)
+        f.fileno = _file_handle(f.fileno)
         return f
 
 
@@ -129,6 +141,8 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
         self._queued_data = deque()
         self._fact = lambda: self
         self._raw_transport = None
+        self._raw_stdio = False
+        self._raw_stdout = None
 
     def _connect_tcp(self, address, port):
         coroutine = self._loop.create_connection(self._fact, address, port)
@@ -145,15 +159,14 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
         if os.name == 'nt':
             coroutine = self._loop.connect_read_pipe(self._fact,
                                                      dup_file(sys.stdin))
+            self._raw_stdio = True
+            self._raw_stdout = sys.stdout
         else:
             coroutine = self._loop.connect_read_pipe(self._fact, sys.stdin)
         self._loop.run_until_complete(coroutine)
-        if os.name == 'nt':
-            coroutine = self._loop.connect_write_pipe(self._fact,
-                                                      dup_file(sys.stdout))
-        else:
+        if os.name != 'nt':
             coroutine = self._loop.connect_write_pipe(self._fact, sys.stdout)
-        self._loop.run_until_complete(coroutine)
+            self._loop.run_until_complete(coroutine)
 
     def _connect_child(self, argv):
         self._child_watcher = asyncio.get_child_watcher()
@@ -165,7 +178,12 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
         pass
 
     def _send(self, data):
-        self._transport.write(data)
+        debug("sent %s %s", repr(data), str(self._raw_stdio))
+        if self._raw_stdio:
+            self._raw_stdout.buffer.write(data)
+            self._raw_stdout.buffer.flush()
+        else:
+            self._transport.write(data)
 
     def _run(self):
         while self._queued_data:
