@@ -180,8 +180,9 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
             self._raw_stdout = True
 
     def _connect_child(self, argv):
-        self._child_watcher = asyncio.get_child_watcher()
-        self._child_watcher.attach_loop(self._loop)
+        if os.name != 'nt':
+            self._child_watcher = asyncio.get_child_watcher()
+            self._child_watcher.attach_loop(self._loop)
         coroutine = self._loop.subprocess_exec(self._fact, *argv)
         self._loop.run_until_complete(coroutine)
 
