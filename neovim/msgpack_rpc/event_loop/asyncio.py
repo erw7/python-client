@@ -15,8 +15,6 @@ import sys
 import logging
 from collections import deque
 
-from .base import BaseEventLoop
-
 logger = logging.getLogger(__name__)
 debug, info, warn = (logger.debug, logger.info, logger.warning)
 
@@ -27,31 +25,16 @@ except (ImportError, SyntaxError):
     # Fallback to trollius
     import trollius as asyncio
 
+from .base import BaseEventLoop
+
 
 loop_cls = asyncio.SelectorEventLoop
 if os.name == 'nt':
+    # On windows use ProactorEventLoop which support pipes and is backed by the
+    # more powerful IOCP facility
+    loop_cls = asyncio.ProactorEventLoop
+
     import msvcrt
-    import functools
-
-    def _to_file_handle(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            return msvcrt.get_osfhandle(func())
-        return wrapper
-
-    def _patch_func(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            saved_func = args[0].fileno
-            try:
-                args[0].fileno = _to_file_handle(args[0].fileno)
-                ret = func(*args, **kwargs)
-                args[0].fileno = saved_func
-            except AttributeError:
-                ret = func(*args, **kwargs)
-            return ret
-        return wrapper
-
     from ctypes import windll, byref, wintypes, WinError, POINTER
     from ctypes.wintypes import HANDLE, LPHANDLE, DWORD, BOOL
 
@@ -59,10 +42,17 @@ if os.name == 'nt':
 
     DUPLICATE_SAME_ACCESS = wintypes.DWORD(0x00000002)
     INVALID_HANDLE_VALUE = HANDLE(-1).value
-    # PIPE_READMODE_BYTE = wintypes.DWORD(0x00000000)
-    # PIPE_WAIT = wintypes.DWORD(0x00000000)
+    PIPE_READMODE_BYTE = wintypes.DWORD(0x00000000)
+    PIPE_WAIT = wintypes.DWORD(0x00000000)
 
-    def _dup_file(file, fmode='rb'):
+    import functools
+    def _file_handle(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            return msvcrt.get_osfhandle(func())
+        return wrapper
+
+    def dup_file(file, fmode='rb'):
         DuplicateHandle = windll.kernel32.DuplicateHandle
         DuplicateHandle.argtypes = [HANDLE,
                                     HANDLE,
@@ -73,12 +63,8 @@ if os.name == 'nt':
                                     DWORD]
         DuplicateHandle.restype = BOOL
 
-        SetNamedPipeHandleState = \
-            windll.kernel32.SetNamedPipeHandleState
-        SetNamedPipeHandleState.argtypes = [HANDLE,
-                                            LPDWORD,
-                                            LPDWORD,
-                                            LPDWORD]
+        SetNamedPipeHandleState = windll.kernel32.SetNamedPipeHandleState
+        SetNamedPipeHandleState.argtypes = [HANDLE, LPDWORD, LPDWORD, LPDWORD]
         SetNamedPipeHandleState.restype = BOOL
 
         hsource = msvcrt.get_osfhandle(file.fileno())
@@ -106,23 +92,8 @@ if os.name == 'nt':
 
         fd = msvcrt.open_osfhandle(htarget.value, 0)
         f = os.fdopen(fd, mode=fmode)
+        f.fileno = _file_handle(f.fileno)
         return f
-
-    class FixedIocpProactor(asyncio.IocpProactor):
-        import functools
-
-        def __init__(self, concurrency=0xffffffff):
-            super().__init__(concurrency)
-            self.recv = _patch_func(self.recv)
-            self.send = _patch_func(self.send)
-            self.accept = _patch_func(self.accept)
-            self.connect = _patch_func(self.connect)
-            self.accept_pipe = _patch_func(self.accept_pipe)
-            self._register_with_iocp = _patch_func(self._register_with_iocp)
-
-    # On windows use ProactorEventLoop which support pipes and is backed by the
-    # more powerful IOCP facility
-    loop_cls = asyncio.ProactorEventLoop
 
 
 class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
@@ -166,10 +137,7 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
         self._on_error('EOF')
 
     def _init(self):
-        if os.name == 'nt':
-            self._loop = loop_cls(FixedIocpProactor())
-        else:
-            self._loop = loop_cls()
+        self._loop = loop_cls()
         self._queued_data = deque()
         self._fact = lambda: self
         self._raw_transport = None
@@ -190,7 +158,7 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
     def _connect_stdio(self):
         if os.name == 'nt':
             coroutine = self._loop.connect_read_pipe(self._fact,
-                                                     _dup_file(sys.stdin))
+                                                     dup_file(sys.stdin))
             self._raw_stdio = True
             self._raw_stdout = sys.stdout
         else:
