@@ -34,15 +34,8 @@ if os.name == 'nt':
     # more powerful IOCP facility
     loop_cls = asyncio.ProactorEventLoop
 
-    import io
     import msvcrt
-
-    class WrappedReader(io.BufferedReader):
-        def __init__(self, f):
-            super().__init__(f)
-
-        def fileno(self):
-            return msvcrt.get_osfhandle(super().fileno())
+    from asyncio.windows_utils import PipeHandle
 
 
 class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
@@ -106,8 +99,10 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
 
     def _connect_stdio(self):
         if os.name == 'nt':
-            coroutine = self._loop.connect_read_pipe(self._fact,
-                                                     WrappedReader(sys.stdin))
+            coroutine = \
+                self._loop.connect_read_pipe(
+                    self._fact,
+                    PipeHandle(msvcrt.get_osfhandle(sys.stdin.fileno())))
             self._raw_stdio = True
             self._raw_stdout = sys.stdout
         else:
