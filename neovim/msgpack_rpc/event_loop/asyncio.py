@@ -15,6 +15,8 @@ import sys
 import logging
 from collections import deque
 
+from .base import BaseEventLoop
+
 logger = logging.getLogger(__name__)
 debug, info, warn = (logger.debug, logger.info, logger.warning)
 
@@ -25,8 +27,6 @@ except (ImportError, SyntaxError):
     # Fallback to trollius
     import trollius as asyncio
 
-from .base import BaseEventLoop
-
 
 loop_cls = asyncio.SelectorEventLoop
 if os.name == 'nt':
@@ -34,66 +34,15 @@ if os.name == 'nt':
     # more powerful IOCP facility
     loop_cls = asyncio.ProactorEventLoop
 
+    import io
     import msvcrt
-    from ctypes import windll, byref, wintypes, WinError, POINTER
-    from ctypes.wintypes import HANDLE, LPHANDLE, DWORD, BOOL
 
-    LPDWORD = POINTER(DWORD)
+    class WrappedReader(io.BufferedReader):
+        def __init__(self, f):
+            super().__init__(f)
 
-    DUPLICATE_SAME_ACCESS = wintypes.DWORD(0x00000002)
-    INVALID_HANDLE_VALUE = HANDLE(-1).value
-    PIPE_READMODE_BYTE = wintypes.DWORD(0x00000000)
-    PIPE_WAIT = wintypes.DWORD(0x00000000)
-
-    import functools
-    def _file_handle(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            return msvcrt.get_osfhandle(func())
-        return wrapper
-
-    def dup_file(file, fmode='rb'):
-        DuplicateHandle = windll.kernel32.DuplicateHandle
-        DuplicateHandle.argtypes = [HANDLE,
-                                    HANDLE,
-                                    HANDLE,
-                                    LPHANDLE,
-                                    DWORD,
-                                    BOOL,
-                                    DWORD]
-        DuplicateHandle.restype = BOOL
-
-        SetNamedPipeHandleState = windll.kernel32.SetNamedPipeHandleState
-        SetNamedPipeHandleState.argtypes = [HANDLE, LPDWORD, LPDWORD, LPDWORD]
-        SetNamedPipeHandleState.restype = BOOL
-
-        hsource = msvcrt.get_osfhandle(file.fileno())
-        htarget = HANDLE()
-
-        res = windll.kernel32.DuplicateHandle(INVALID_HANDLE_VALUE,
-                                              hsource,
-                                              INVALID_HANDLE_VALUE,
-                                              byref(htarget),
-                                              0,
-                                              BOOL(False),
-                                              DUPLICATE_SAME_ACCESS)
-        if res == 0:
-            print(WinError())
-            return None
-
-        mode = DWORD(0x00000000)
-        res = windll.kernel32.SetNamedPipeHandleState(htarget,
-                                                      byref(mode),
-                                                      None,
-                                                      None)
-        if res == 0:
-            print(WinError())
-            return None
-
-        fd = msvcrt.open_osfhandle(htarget.value, 0)
-        f = os.fdopen(fd, mode=fmode)
-        f.fileno = _file_handle(f.fileno)
-        return f
+        def fileno(self):
+            return msvcrt.get_osfhandle(super().fileno())
 
 
 class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
@@ -158,7 +107,7 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
     def _connect_stdio(self):
         if os.name == 'nt':
             coroutine = self._loop.connect_read_pipe(self._fact,
-                                                     dup_file(sys.stdin))
+                                                     WrappedReader(sys.stdin))
             self._raw_stdio = True
             self._raw_stdout = sys.stdout
         else:
