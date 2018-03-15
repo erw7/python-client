@@ -15,7 +15,6 @@ import os
 import sys
 from collections import deque
 import threading
-
 try:
     # For python 3.4+, use the standard library module
     import asyncio
@@ -30,6 +29,8 @@ debug, info, warn = (logger.debug, logger.info, logger.warning,)
 
 loop_cls = asyncio.SelectorEventLoop
 if os.name == 'nt':
+    from asyncio.windows_utils import PipeHandle
+
     # On windows use ProactorEventLoop which support pipes and is backed by the
     # more powerful IOCP facility
     # NOTE: we override in the stdio case, because it doesn't work.
@@ -126,7 +127,11 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
 
     def _connect_stdio(self):
         try:
-            coroutine = self._loop.connect_read_pipe(self._fact, sys.stdin)
+            if os.name == 'nt':
+                pipe = PipeHandle(msvcrt.get_osfhandle(sys.stdin.fileno()))
+            else:
+                pipe = sys.stdin
+            coroutine = self._loop.connect_read_pipe(self._fact, pipe)
             self._loop.run_until_complete(coroutine)
             debug("native stdin connection successful")
         except OSError:
@@ -146,11 +151,15 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
 
 
         try:
-            coroutine = self._loop.connect_write_pipe(self._fact, sys.stdout)
+            if os.name == 'nt':
+                pipe = PipeHandle(msvcrt.get_osfhandle(sys.stdout.fileno()))
+            else:
+                pipe = sys.stdout
+            coroutine = self._loop.connect_write_pipe(self._fact, pipe)
             self._loop.run_until_complete(coroutine)
             debug("native stdout connection successful")
         except OSError:
-            debug("native stdout connection failed, using reader thread")
+            debug("native stdout connection failed, using blocking writes")
 
             self._stdout = sys.stdout.buffer
             self._raw_stdout = True
