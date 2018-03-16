@@ -15,6 +15,7 @@ import os
 import sys
 from collections import deque
 import threading
+import inspect
 try:
     # For python 3.4+, use the standard library module
     import asyncio
@@ -37,27 +38,41 @@ if os.name == 'nt':
     loop_cls = asyncio.ProactorEventLoop
 
     import msvcrt
-    from ctypes import windll, byref, wintypes, GetLastError, WinError, POINTER
-    from ctypes.wintypes import HANDLE, DWORD, BOOL
+    from ctypes import windll, byref, wintypes, WinError, POINTER
+    from ctypes.wintypes import HANDLE, LPHANDLE, DWORD, BOOL
 
     LPDWORD = POINTER(DWORD)
 
-    PIPE_NOWAIT = wintypes.DWORD(0x00000001)
+    DUPLICATE_SAME_ACCESS = wintypes.DWORD(0x00000002)
+    INVALID_HANDLE_VALUE = HANDLE(-1).value
 
-    ERROR_NO_DATA = 232
+    def _dup_filehandle(src):
+        DuplicateHandle = windll.kernel32.DuplicateHandle
+        DuplicateHandle.argtypes = [HANDLE,
+                                    HANDLE,
+                                    HANDLE,
+                                    LPHANDLE,
+                                    DWORD,
+                                    BOOL,
+                                    DWORD]
+        DuplicateHandle.restype = BOOL
 
-    def pipe_no_wait(pipefd):
-        SetNamedPipeHandleState = windll.kernel32.SetNamedPipeHandleState
-        SetNamedPipeHandleState.argtypes = [HANDLE, LPDWORD, LPDWORD, LPDWORD]
-        SetNamedPipeHandleState.restype = BOOL
+        hsource = msvcrt.get_osfhandle(src.fileno())
+        htarget = HANDLE()
 
-        h = msvcrt.get_osfhandle(pipefd)
-
-        res = windll.kernel32.SetNamedPipeHandleState(h, byref(PIPE_NOWAIT), None, None)
+        res = windll.kernel32.DuplicateHandle(INVALID_HANDLE_VALUE,
+                                              hsource,
+                                              INVALID_HANDLE_VALUE,
+                                              byref(htarget),
+                                              0,
+                                              BOOL(False),
+                                              DUPLICATE_SAME_ACCESS)
         if res == 0:
-            print(WinError())
-            return False
-        return True
+            debug("Failed DuplicateHandle %s", WinError())
+            return None
+
+        return htarget.value
+
 
 class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
                        asyncio.SubprocessProtocol):
@@ -73,6 +88,15 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
 
     def connection_lost(self, exc):
         """Used to signal `asyncio.Protocol` of a lost connection."""
+        if exc.args[3] == 87:
+            for frame in inspect.stack():
+                if frame.function == '_connect_stdio':
+                    debug(
+                        "native stdin connection failed, using reader thread")
+                    self._stdin = sys.stdin.buffer
+                    self._active = True
+                    threading.Thread(target=self._stdin_reader).start()
+                    return
         self._on_error(exc.args[0] if exc else 'EOF')
 
     def data_received(self, data):
@@ -105,6 +129,8 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
         self._fact = lambda: self
         self._raw_transport = None
         self._raw_stdout = False
+        self._stdin = None
+        self._stdout = None
         self._active = False
 
     def _connect_tcp(self, address, port):
@@ -119,36 +145,25 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
         self._loop.run_until_complete(coroutine)
 
     def _stdin_reader(self):
-        debug("started reader thread")
-        while True: #self._active
-            data = self._stdin.read(1)
-            debug("reader thread read %d", len(data))
-            self._loop.call_soon_threadsafe(self.data_received, data)
+        try:
+            debug("started reader thread")
+            while True:  # self._active
+                data = self._stdin.read(1)
+                debug("reader thread read %d", len(data))
+                self._loop.call_soon_threadsafe(self.data_received, data)
+        except Exception:
+            import traceback
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            debug("%s %s %s", exc_type, exc_value,
+                  traceback.format_list(traceback.extract_tb(exc_traceback)))
 
     def _connect_stdio(self):
-        try:
-            if os.name == 'nt':
-                pipe = PipeHandle(msvcrt.get_osfhandle(sys.stdin.fileno()))
-            else:
-                pipe = sys.stdin
-            coroutine = self._loop.connect_read_pipe(self._fact, pipe)
-            self._loop.run_until_complete(coroutine)
-            debug("native stdin connection successful")
-        except OSError:
-            debug("native stdin connection failed, using reader thread")
-            if os.name == "nt":
-                pass
-                #pipe_no_wait(sys.stdin.fileno())
-            else:
-                import fcntl
-                #orig_fl = fcntl.fcntl(sys.stdin.fileno(), fcntl.F_GETFL)
-                #fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETFL, orig_fl | os.O_NONBLOCK)
-            #coro = self._loop.run_in_executor(None, self._stdin_reader)
-            #self._loop.create_task(coro)
-            self._stdin = sys.stdin.buffer
-            self._active = True
-            threading.Thread(target=self._stdin_reader).start()
-
+        if os.name == 'nt':
+            pipe = PipeHandle(_dup_filehandle(sys.stdin))
+        else:
+            pipe = sys.stdin
+        coroutine = self._loop.connect_read_pipe(self._fact, pipe)
+        self._loop.run_until_complete(coroutine)
 
         try:
             if os.name == 'nt':
