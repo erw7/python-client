@@ -37,7 +37,9 @@ if os.name == 'nt':
     loop_cls = asyncio.ProactorEventLoop
 
     import msvcrt
-    from ctypes import windll, byref, wintypes, GetLastError, WinError, POINTER
+    from ctypes import (cast, cdll, windll, byref, c_int, c_long, c_size_t,
+                        c_ulong, c_void_p, wintypes, WinError,
+                        POINTER, Structure, Union, sizeof)
     from ctypes.wintypes import HANDLE, DWORD, BOOL
 
     LPDWORD = POINTER(DWORD)
@@ -45,6 +47,47 @@ if os.name == 'nt':
     PIPE_NOWAIT = wintypes.DWORD(0x00000001)
 
     ERROR_NO_DATA = 232
+
+    STATUS_SUCCESS = c_ulong(0x00000000)
+    FileModeInformation = c_int(16)
+    FILE_SYNCHRONOUS_IO_ALERT = 0x00000010
+    FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
+
+    class IO_STATUS_BLOCK(Union):
+        _fields_ = [("Status", c_long), ("Pointer", c_void_p)]
+
+    class FILE_MODE_INFORMATION(Structure):
+        pass
+
+    FILE_MODE_INFORMATION._fields_ = [
+        ("Mode", c_ulong),
+        ("FFILE_MODE_INFORMATION)", POINTER(FILE_MODE_INFORMATION))]
+
+    def is_overlapped_pipe(handle):
+        ntdll = cdll.LoadLibrary("ntdll.dll")
+        NtQueryInformationFile = ntdll.NtQueryInformationFile
+        NtQueryInformationFile.argtypes = [HANDLE,
+                                           POINTER(IO_STATUS_BLOCK),
+                                           c_void_p,
+                                           c_size_t,
+                                           c_int]
+        NtQueryInformationFile.restype = c_ulong
+
+        io_status = IO_STATUS_BLOCK()
+        mode_info = FILE_MODE_INFORMATION()
+        res = NtQueryInformationFile(handle,
+                                     byref(io_status),
+                                     cast(byref(mode_info), c_void_p),
+                                     sizeof(mode_info),
+                                     FileModeInformation)
+        if res != STATUS_SUCCESS.value:
+            debug(WinError())
+            raise OSError
+
+        if mode_info.Mode & FILE_SYNCHRONOUS_IO_ALERT \
+                or mode_info.Mode & FILE_SYNCHRONOUS_IO_NONALERT:
+            return False
+        return True
 
     def pipe_no_wait(pipefd):
         SetNamedPipeHandleState = windll.kernel32.SetNamedPipeHandleState
@@ -58,6 +101,7 @@ if os.name == 'nt':
             print(WinError())
             return False
         return True
+
 
 class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
                        asyncio.SubprocessProtocol):
@@ -120,35 +164,27 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
 
     def _stdin_reader(self):
         debug("started reader thread")
-        while True: #self._active
+        while True:  # self._active
             data = self._stdin.read(1)
             debug("reader thread read %d", len(data))
             self._loop.call_soon_threadsafe(self.data_received, data)
 
     def _connect_stdio(self):
-        try:
-            if os.name == 'nt':
-                pipe = PipeHandle(msvcrt.get_osfhandle(sys.stdin.fileno()))
+        if os.name == 'nt':
+            if is_overlapped_pipe(msvcrt.get_osfhandle(sys.stdin.fileno())):
+                debug("overlapped pipe, using native stdin connection")
+                coroutine = self._loop.connect_read_pipe(
+                    self._fact,
+                    PipeHandle(msvcrt.get_osfhandle(sys.stdin.fileno())))
+                self._loop.run_until_complete(coroutine)
             else:
-                pipe = sys.stdin
-            coroutine = self._loop.connect_read_pipe(self._fact, pipe)
+                debug("none overlapped pipe, using reader thread")
+                self._stdin = sys.stdin.buffer
+                self._active = True
+                threading.Thread(target=self._stdin_reader).start()
+        else:
+            coroutine = self._loop.connect_read_pipe(self._fact, sys.stdin)
             self._loop.run_until_complete(coroutine)
-            debug("native stdin connection successful")
-        except OSError:
-            debug("native stdin connection failed, using reader thread")
-            if os.name == "nt":
-                pass
-                #pipe_no_wait(sys.stdin.fileno())
-            else:
-                import fcntl
-                #orig_fl = fcntl.fcntl(sys.stdin.fileno(), fcntl.F_GETFL)
-                #fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETFL, orig_fl | os.O_NONBLOCK)
-            #coro = self._loop.run_in_executor(None, self._stdin_reader)
-            #self._loop.create_task(coro)
-            self._stdin = sys.stdin.buffer
-            self._active = True
-            threading.Thread(target=self._stdin_reader).start()
-
 
         try:
             if os.name == 'nt':
