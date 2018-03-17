@@ -37,25 +37,14 @@ if os.name == 'nt':
     loop_cls = asyncio.ProactorEventLoop
 
     import msvcrt
-    from ctypes import windll, byref, cast, c_void_p, wintypes, GetLastError, WinError, POINTER
-    from ctypes.wintypes import HANDLE, DWORD, BOOL, BYTE
+    from ctypes import windll, byref, wintypes, GetLastError, WinError, POINTER
+    from ctypes.wintypes import HANDLE, DWORD, BOOL
 
     LPDWORD = POINTER(DWORD)
 
     PIPE_NOWAIT = wintypes.DWORD(0x00000001)
 
     ERROR_NO_DATA = 232
-
-    def read_file(fd):
-        ReadFile = windll.kernel32.ReadFile
-        ReadFile.argtypes = [HANDLE, c_void_p, DWORD, LPDWORD, c_void_p]
-        ReadFile.restype = BOOL
-        buf = BYTE(1)
-        number_of_byte_read = DWORD()
-        res = ReadFile(msvcrt.get_osfhandle(fd), cast(byref(buf), c_void_p), 1, byref(number_of_byte_read), None)
-        if res == 0:
-            raise OSError
-        return bytes(buf)
 
     def pipe_no_wait(pipefd):
         SetNamedPipeHandleState = windll.kernel32.SetNamedPipeHandleState
@@ -69,7 +58,6 @@ if os.name == 'nt':
             print(WinError())
             return False
         return True
-
 
 class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
                        asyncio.SubprocessProtocol):
@@ -132,29 +120,35 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
 
     def _stdin_reader(self):
         debug("started reader thread")
-        while True:  # self._active
+        while True: #self._active
             data = self._stdin.read(1)
             debug("reader thread read %d", len(data))
             self._loop.call_soon_threadsafe(self.data_received, data)
 
     def _connect_stdio(self):
-        if os.name == 'nt':
-            try:
-                # data = sys.stdin.buffer.read(1)
-                data = read_file(sys.stdin.fileno())
-                self._loop.call_soon(self.data_received, data)
-                self._stdin = sys.stdin.buffer
-                self._active = True
-                threading.Thread(target=self._stdin_reader).start()
-                debug("read 1btye from sys.stdin successful, using reader thread")
-            except OSError:
-                debug("read 1btye from sys.stdin failed, using native stdin connection")
-                coroutine = self._loop.connect_read_pipe(self._fact,
-                    PipeHandle(msvcrt.get_osfhandle(sys.stdin.fileno())))
-                self._loop.run_until_complete(coroutine)
-        else:
-            coroutine = self._loop.connect_read_pipe(self._fact, sys.stdin)
+        try:
+            if os.name == 'nt':
+                pipe = PipeHandle(msvcrt.get_osfhandle(sys.stdin.fileno()))
+            else:
+                pipe = sys.stdin
+            coroutine = self._loop.connect_read_pipe(self._fact, pipe)
             self._loop.run_until_complete(coroutine)
+            debug("native stdin connection successful")
+        except OSError:
+            debug("native stdin connection failed, using reader thread")
+            if os.name == "nt":
+                pass
+                #pipe_no_wait(sys.stdin.fileno())
+            else:
+                import fcntl
+                #orig_fl = fcntl.fcntl(sys.stdin.fileno(), fcntl.F_GETFL)
+                #fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETFL, orig_fl | os.O_NONBLOCK)
+            #coro = self._loop.run_in_executor(None, self._stdin_reader)
+            #self._loop.create_task(coro)
+            self._stdin = sys.stdin.buffer
+            self._active = True
+            threading.Thread(target=self._stdin_reader).start()
+
 
         try:
             if os.name == 'nt':
