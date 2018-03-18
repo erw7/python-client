@@ -171,19 +171,20 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
 
     def _connect_stdio(self):
         if os.name == 'nt':
-            if is_overlapped_pipe(msvcrt.get_osfhandle(sys.stdin.fileno())):
-                debug("overlapped pipe, using native stdin connection")
-                coroutine = self._loop.connect_read_pipe(
-                    self._fact,
-                    PipeHandle(msvcrt.get_osfhandle(sys.stdin.fileno())))
-                self._loop.run_until_complete(coroutine)
-            else:
-                debug("none overlapped pipe, using reader thread")
-                self._stdin = sys.stdin.buffer
-                self._active = True
-                threading.Thread(target=self._stdin_reader).start()
+            handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+
+        if os.name == 'nt' and not is_overlapped_pipe(handle):
+            debug("none overlapped pipe, using reader thread")
+            self._stdin = sys.stdin.buffer
+            self._active = True
+            threading.Thread(target=self._stdin_reader).start()
         else:
-            coroutine = self._loop.connect_read_pipe(self._fact, sys.stdin)
+            if os.name == 'nt':
+                debug("overlapped pipe, using native stdin connection")
+                pipe = PipeHandle(handle)
+            else:
+                pipe = sys.stdin
+            coroutine = self._loop.connect_read_pipe(self._fact, pipe)
             self._loop.run_until_complete(coroutine)
 
         try:
