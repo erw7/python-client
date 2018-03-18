@@ -38,16 +38,11 @@ if os.name == 'nt':
     loop_cls = asyncio.ProactorEventLoop
 
     import msvcrt
-    from ctypes import (cast, cdll, windll, byref, c_int, c_long, c_size_t,
-                        c_ulong, c_void_p, wintypes, WinError,
-                        POINTER, Structure, Union, sizeof)
-    from ctypes.wintypes import HANDLE, DWORD, BOOL
+    from ctypes import (cast, cdll, byref, c_int, c_long, c_size_t, c_ulong,
+                        c_void_p, WinError, POINTER, Structure, Union, sizeof)
+    from ctypes.wintypes import HANDLE, DWORD
 
     LPDWORD = POINTER(DWORD)
-
-    PIPE_NOWAIT = wintypes.DWORD(0x00000001)
-
-    ERROR_NO_DATA = 232
 
     STATUS_SUCCESS = 0x00000000
     FileModeInformation = c_int(16)
@@ -91,19 +86,6 @@ if os.name == 'nt':
 
         if mode_info.Mode & FILE_SYNCHRONOUS_IO_ALERT \
                 or mode_info.Mode & FILE_SYNCHRONOUS_IO_NONALERT:
-            return False
-        return True
-
-    def pipe_no_wait(pipefd):
-        SetNamedPipeHandleState = windll.kernel32.SetNamedPipeHandleState
-        SetNamedPipeHandleState.argtypes = [HANDLE, LPDWORD, LPDWORD, LPDWORD]
-        SetNamedPipeHandleState.restype = BOOL
-
-        h = msvcrt.get_osfhandle(pipefd)
-
-        res = windll.kernel32.SetNamedPipeHandleState(h, byref(PIPE_NOWAIT), None, None)
-        if res == 0:
-            print(WinError())
             return False
         return True
 
