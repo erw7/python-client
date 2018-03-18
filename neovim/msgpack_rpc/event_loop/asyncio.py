@@ -15,6 +15,7 @@ import os
 import sys
 from collections import deque
 import threading
+from msgpack import Unpacker
 try:
     # For python 3.4+, use the standard library module
     import asyncio
@@ -168,10 +169,22 @@ class AsyncioEventLoop(BaseEventLoop, asyncio.Protocol,
 
     def _stdin_reader(self):
         debug("started reader thread")
+        unpacker = Unpacker()
+        stored_data = b''
         while True:  # self._active
-            data = self._stdin.read(1)
-            debug("reader thread read %d", len(data))
-            self._loop.call_soon_threadsafe(self.data_received, data)
+            try:
+                data = self._stdin.read(1)
+                stored_data += data
+                unpacker.feed(data)
+                next(unpacker)
+                debug("reader thread read %d", len(stored_data))
+                self._loop.call_soon_threadsafe(self.data_received,
+                                                stored_data)
+                stored_data = b''
+            except StopIteration:
+                pass
+            except Exception:
+                debug("%s", sys.exc_info())
 
     def _connect_stdio(self):
         if os.name == 'nt':
