@@ -48,7 +48,7 @@ if os.name == 'nt':
 
     ERROR_NO_DATA = 232
 
-    STATUS_SUCCESS = c_ulong(0x00000000)
+    STATUS_SUCCESS = 0x00000000
     FileModeInformation = c_int(16)
     FILE_SYNCHRONOUS_IO_ALERT = 0x00000010
     FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
@@ -84,7 +84,7 @@ if os.name == 'nt':
                                      cast(byref(mode_info), c_void_p),
                                      sizeof(mode_info),
                                      FileModeInformation)
-        if res != STATUS_SUCCESS.value:
+        if res != STATUS_SUCCESS:
             debug(WinError())
             return False
 
