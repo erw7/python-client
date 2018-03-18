@@ -64,14 +64,18 @@ if os.name == 'nt':
         ("FFILE_MODE_INFORMATION)", POINTER(FILE_MODE_INFORMATION))]
 
     def is_overlapped_pipe(handle):
-        ntdll = cdll.LoadLibrary("ntdll.dll")
-        NtQueryInformationFile = ntdll.NtQueryInformationFile
-        NtQueryInformationFile.argtypes = [HANDLE,
-                                           POINTER(IO_STATUS_BLOCK),
-                                           c_void_p,
-                                           c_size_t,
-                                           c_int]
-        NtQueryInformationFile.restype = c_ulong
+        try:
+            ntdll = cdll.LoadLibrary("ntdll.dll")
+            NtQueryInformationFile = ntdll.NtQueryInformationFile
+            NtQueryInformationFile.argtypes = [HANDLE,
+                                               POINTER(IO_STATUS_BLOCK),
+                                               c_void_p,
+                                               c_size_t,
+                                               c_int]
+            NtQueryInformationFile.restype = c_ulong
+        except OSError as e:
+            debug("%s", e)
+            return False
 
         io_status = IO_STATUS_BLOCK()
         mode_info = FILE_MODE_INFORMATION()
@@ -82,7 +86,7 @@ if os.name == 'nt':
                                      FileModeInformation)
         if res != STATUS_SUCCESS.value:
             debug(WinError())
-            raise OSError
+            return False
 
         if mode_info.Mode & FILE_SYNCHRONOUS_IO_ALERT \
                 or mode_info.Mode & FILE_SYNCHRONOUS_IO_NONALERT:
